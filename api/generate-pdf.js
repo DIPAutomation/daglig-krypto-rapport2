@@ -90,6 +90,10 @@ export default async function handler(req, res) {
     let y = 780;
 
     const drawLine = (text, size = 12, color = rgb(0, 0, 0)) => {
+      if (y < 40) { // ny side ved behov
+        page = pdfDoc.addPage([595, 842]);
+        y = 800;
+      }
       page.drawText(text, { x: 50, y, size, font, color });
       y -= 18;
     };
@@ -122,6 +126,19 @@ export default async function handler(req, res) {
     drawLine(`VIX Index: ${vixValue}`);
     drawLine(`BTC Dominance: ${btcDominance}`);
 
+    // Tillegg: Forklaring og tolkning av indikatorer
+    drawLine('');
+    drawLine('Tolkning av Markedsindikatorer:');
+    drawLine('Fear & Greed Index reflekterer markedssentiment. Høye verdier (70+) tyder på grådighet og mulig topp før korreksjon.');
+    drawLine('Lave verdier (30-) signaliserer frykt og kan være gode kjøpsmuligheter i kryptomarkedet.');
+    drawLine('VIX, også kalt "fryktindeksen" for aksjemarkedet, måler forventet volatilitet. Høy VIX kan trekke kapital ut av risikofylte aktiva som krypto.');
+    drawLine('Når VIX stiger, øker risikoaversjonen, noe som ofte gir lavere kryptopriser på kort sikt.');
+    drawLine('');
+    drawLine('BTC Dominans beskriver hvor stor andel av total kryptomarkedsverdi Bitcoin utgjør.');
+    drawLine('Økende dominans kan tyde på at kapital trekkes ut av altcoins og samles i Bitcoin, ofte i usikre tider.');
+    drawLine('Synkende dominans indikerer økt interesse for altcoins, typisk i bull-markeder når risikoappetitten øker.');
+    drawLine('Dette gir investorer hint om når man bør justere allokering mellom BTC og altcoins.');
+
     // Analytikertabell
     drawLine('');
     drawLine('Analytikeranbefalinger pr. valuta:');
@@ -132,7 +149,26 @@ export default async function handler(req, res) {
       drawLine(`${symbol}: analyserte ${total}; Kjøp ${counts.Buy}; Hold ${counts.Hold}; Selg ${counts.Sell}; Flest anbefaler ${maxType.toUpperCase()} (${maxPercent}%)`);
     });
 
-    // Fremtidsanalyse
+    // Makroøkonomisk analyse
+    drawLine('');
+    drawLine('Makroøkonomisk Situasjon og Kryptomarkedet:');
+    drawLine('Globale renter og inflasjon påvirker investorers risikovilje. Strammere pengepolitikk kan redusere kapitaltilgang til risikofylte aktiva.');
+    drawLine('Inflasjonsbekymringer kan samtidig øke interessen for Bitcoin som "digitalt gull".');
+    drawLine('Geopolitiske spenninger øker ofte volatiliteten i kryptomarkedet.');
+    drawLine('Regulatoriske nyheter, spesielt fra USA og EU, er viktige markedsdrivere.');
+    drawLine('ETF-godkjenninger og institusjonell interesse viser modning, men markedet er fortsatt sensitivt for nyheter.');
+    drawLine('Investorer bør være forberedt på raske svingninger og ha klare exit-strategier.');
+
+    // Investeringsstrategi
+    drawLine('');
+    drawLine('Investeringsstrategi:');
+    drawLine('Bruk Fear & Greed Index og VIX som indikatorer på sentiment og risikoappetitt.');
+    drawLine('Ved høy frykt kan økt eksponering mot BTC og ETH være gunstig.');
+    drawLine('Synkende BTC-dominans og lav frykt kan være et godt tidspunkt for å øke andelen altcoins.');
+    drawLine('Følg nøye med på makroøkonomiske nyheter og regulatoriske endringer.');
+    drawLine('Langsiktige investorer bør fokusere på diversifisering, mens tradere kan utnytte volatilitet.');
+
+    // Fremtidsanalyse (dine eksisterende linjer)
     drawLine('');
     drawLine('Generell Fremtidsanalyse:');
     drawLine('ETF-godkjenninger gir økt institusjonell interesse.');
@@ -161,6 +197,6 @@ export default async function handler(req, res) {
     const pdfBytes = await pdfDoc.save();
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename=Feilrapport.pdf');
-    res.status(200).send(Buffer.from(pdfBytes));
+    res.status(500).send(Buffer.from(pdfBytes));
   }
 }
