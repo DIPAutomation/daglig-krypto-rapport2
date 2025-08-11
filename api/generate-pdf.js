@@ -1,5 +1,6 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
+// Hjelpefunksjon med timeout
 async function fetchWithTimeout(url, options = {}, timeout = 3000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
@@ -13,18 +14,71 @@ async function fetchWithTimeout(url, options = {}, timeout = 3000) {
   }
 }
 
-function formatPercentChange(newVal, oldVal) {
-  if (oldVal == null || newVal == null) return 'N/A';
-  const change = ((newVal - oldVal) / oldVal) * 100;
-  return `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
+// Hjelpefunksjon for tekst med wrapping innenfor maks bredde
+function drawWrappedText(page, font, text, x, y, maxWidth, size, color = rgb(0, 0, 0), lineHeight = 14) {
+  const words = text.split(' ');
+  let line = '';
+  for (let n = 0; n < words.length; n++) {
+    const testLine = line + words[n] + ' ';
+    const testWidth = font.widthOfTextAtSize(testLine, size);
+    if (testWidth > maxWidth && n > 0) {
+      page.drawText(line, { x, y, size, font, color });
+      line = words[n] + ' ';
+      y -= lineHeight;
+    } else {
+      line = testLine;
+    }
+  }
+  if (line) {
+    page.drawText(line, { x, y, size, font, color });
+    y -= lineHeight;
+  }
+  return y;
+}
+
+// Hjelpefunksjon for å tegne tabell
+function drawTable(page, font, headers, rows, startX, startY, colWidths, rowHeight, fontSize) {
+  let y = startY;
+  const black = rgb(0, 0, 0);
+  const gray = rgb(0.8, 0.8, 0.8);
+
+  // Tegn header
+  let x = startX;
+  headers.forEach((h, i) => {
+    page.drawRectangle({ x, y: y - rowHeight, width: colWidths[i], height: rowHeight, color: gray });
+    page.drawText(h, { x: x + 5, y: y - rowHeight + 5, size: fontSize, font, color: black });
+    x += colWidths[i];
+  });
+
+  y -= rowHeight;
+
+  // Tegn rader
+  rows.forEach((row, idx) => {
+    x = startX;
+    row.forEach((cell, i) => {
+      if (idx % 2 === 1) {
+        page.drawRectangle({ x, y: y - rowHeight, width: colWidths[i], height: rowHeight, color: rgb(0.95, 0.95, 0.95) });
+      }
+      page.drawText(cell, { x: x + 5, y: y - rowHeight + 5, size: fontSize, font, color: black });
+      x += colWidths[i];
+    });
+    y -= rowHeight;
+  });
+
+  return y;
 }
 
 export default async function handler(req, res) {
   try {
     const errors = [];
 
-    const coins = ['bitcoin', 'ethereum', 'injective-protocol', 'fetch-ai', 'dogecoin', 'ripple', 'solana'];
+    // Dummydata initialiseres
+    let cryptoPrices = {};
+    let fearGreedIndex = { value: "N/A", classification: "N/A", change: { day: "N/A", week: "N/A", month: "N/A" } };
+    let btcDominance = { current: "N/A", change: { day: "N/A", week: "N/A", month: "N/A" } };
+    let vixValue = { current: "N/A", change: { day: "N/A", week: "N/A", month: "N/A" } };
 
+    // Analytiker-tabell (dummy)
     const analystTable = {
       BTC: { Buy: 3, Hold: 3, Sell: 1 },
       ETH: { Buy: 4, Hold: 2, Sell: 1 },
@@ -35,242 +89,240 @@ export default async function handler(req, res) {
       SOL: { Buy: 4, Hold: 2, Sell: 1 }
     };
 
-    let cryptoPrices = {};
-    let fearGreedIndex = { current: null, history: [] };
-    let btcDominance = { current: null, history: [] };
-    let vixValue = { current: null, history: [] };
+    // Coins å hente info for
+    const coins = ['bitcoin', 'ethereum', 'injective-protocol', 'fetch-ai', 'dogecoin', 'ripple', 'solana'];
 
+    // Funksjon for å hente historikk for endringer (1d, 7d, 30d)
+    async function fetchHistoricalChange(id, days) {
+      try {
+        const res = await fetchWithTimeout(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}`);
+        const data = await res.json();
+        if (data?.prices && data.prices.length > 1) {
+          const startPrice = data.prices[0][1];
+          const endPrice = data.prices[data.prices.length - 1][1];
+          const change = ((endPrice - startPrice) / startPrice) * 100;
+          return change.toFixed(2);
+        }
+      } catch {
+        return "N/A";
+      }
+      return "N/A";
+    }
+
+    // Hent data parallelt
     await Promise.allSettled([
+      // Kryptopriser + 24t endring
       (async () => {
         try {
-          const r = await fetchWithTimeout(`https://api.coingecko.com/api/v3/simple/price?ids=${coins.join(',')}&vs_currencies=usd&include_market_cap=true&include_24hr_change=true`);
+          const r = await fetchWithTimeout(
+            `https://api.coingecko.com/api/v3/simple/price?ids=${coins.join(',')}&vs_currencies=usd&include_market_cap=true&include_24hr_change=true`
+          );
           cryptoPrices = await r.json();
         } catch (err) {
           errors.push(`CoinGecko-feil: ${err.message}`);
         }
       })(),
+      // Fear & Greed index nå og historikk for endringer siste dag, uke, måned
       (async () => {
         try {
           const r = await fetchWithTimeout('https://api.alternative.me/fng/');
           const d = await r.json();
           if (d?.data?.[0]) {
-            fearGreedIndex.current = {
-              value: Number(d.data[0].value),
-              classification: d.data[0].value_classification
-            };
+            fearGreedIndex.value = d.data[0].value;
+            fearGreedIndex.classification = d.data[0].value_classification;
+
+            // Ingen direkte historikk API tilgjengelig - for demo setter vi N/A
+            fearGreedIndex.change = { day: "N/A", week: "N/A", month: "N/A" };
           }
-          fearGreedIndex.history = [
-            { period: '1 Day Ago', value: 45 },
-            { period: '7 Days Ago', value: 38 },
-            { period: '30 Days Ago', value: 50 },
-          ];
         } catch (err) {
           errors.push(`Fear & Greed-feil: ${err.message}`);
         }
       })(),
+      // BTC Dominance nå og historikk (1d,7d,30d)
       (async () => {
         try {
           const r = await fetchWithTimeout('https://api.coingecko.com/api/v3/global');
           const d = await r.json();
           if (d?.data?.market_cap_percentage?.btc != null) {
-            btcDominance.current = d.data.market_cap_percentage.btc;
+            btcDominance.current = d.data.market_cap_percentage.btc.toFixed(2) + '%';
           }
-          btcDominance.history = [
-            { period: '1 Day Ago', value: btcDominance.current ? btcDominance.current - 0.5 : null },
-            { period: '7 Days Ago', value: btcDominance.current ? btcDominance.current - 1.2 : null },
-            { period: '30 Days Ago', value: btcDominance.current ? btcDominance.current - 3.4 : null },
-          ];
+          // Historikk for BTC dominance er ikke direkte tilgjengelig i CoinGecko, setter N/A
+          btcDominance.change = { day: "N/A", week: "N/A", month: "N/A" };
         } catch (err) {
           errors.push(`BTC Dominance-feil: ${err.message}`);
         }
       })(),
+      // VIX verdi nå og endring (vi henter daglig sluttkurs 1d, men 7d/30d ikke enkelt tilgjengelig - N/A)
       (async () => {
         try {
-          const r = await fetchWithTimeout('https://query1.finance.yahoo.com/v8/finance/chart/^VIX');
+          const r = await fetchWithTimeout('https://query1.finance.yahoo.com/v8/finance/chart/^VIX?range=1mo&interval=1d');
           const d = await r.json();
-          const val = d?.chart?.result?.[0]?.meta?.regularMarketPrice;
-          if (val != null) vixValue.current = val;
-          vixValue.history = [
-            { period: '1 Day Ago', value: val ? val * 0.95 : null },
-            { period: '7 Days Ago', value: val ? val * 1.05 : null },
-            { period: '30 Days Ago', value: val ? val * 0.9 : null },
-          ];
+          const prices = d?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+          if (prices && prices.length > 0) {
+            const today = prices[prices.length - 1];
+            const dayBefore = prices[prices.length - 2];
+            vixValue.current = today.toFixed(2);
+            if (today != null && dayBefore != null) {
+              const changeDay = ((today - dayBefore) / dayBefore) * 100;
+              vixValue.change.day = changeDay.toFixed(2) + '%';
+            }
+          }
+          // Ukentlig og månedlig endring vanskelig tilgjengelig uten mer data, setter N/A
+          if (!vixValue.change.week) vixValue.change.week = "N/A";
+          if (!vixValue.change.month) vixValue.change.month = "N/A";
         } catch (err) {
           errors.push(`VIX-feil: ${err.message}`);
         }
       })(),
     ]);
 
+    // Bygg PDF
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([595, 842]);
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-    let y = 800;
+    const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
-    const lineHeight = 18;
-    const marginLeft = 50;
-    const marginRight = 545;
+    let y = 820;
+    const marginX = 40;
+    const maxWidth = 515;
 
-    function drawText(text, options = {}) {
-      const {
-        x = marginLeft,
-        size = 12,
-        color = rgb(0, 0, 0),
-        bold = false,
-      } = options;
+    // Tittel
+    page.drawText(`Daglig Kryptomarked Rapport – ${new Date().toISOString().split('T')[0]}`, {
+      x: marginX,
+      y,
+      size: 16,
+      font: helveticaBold,
+      color: rgb(0, 0, 0),
+    });
+    y -= 30;
 
-      const fontToUse = bold ? fontBold : font;
+    // Kryptopriser tabell header
+    page.drawText('Kryptopriser (USD) og 24t endring:', { x: marginX, y, size: 14, font: helveticaBold });
+    y -= 20;
 
-      const maxWidth = marginRight - x;
-      const approxCharPerLine = Math.floor(maxWidth / (size * 0.6));
-      const words = text.split(' ');
-      let line = '';
-      for (const word of words) {
-        const testLine = line + word + ' ';
-        if (testLine.length > approxCharPerLine) {
-          page.drawText(line.trim(), { x, y, size, font: fontToUse, color });
-          y -= lineHeight;
-          line = word + ' ';
-        } else {
-          line = testLine;
-        }
-      }
-      if (line) {
-        page.drawText(line.trim(), { x, y, size, font: fontToUse, color });
-        y -= lineHeight;
-      }
-    }
-
-    function drawTableRow(cols, widths, opts = {}) {
-      let x = marginLeft;
-      const size = opts.size || 12;
-      const fontToUse = opts.bold ? fontBold : font;
-      const color = opts.color || rgb(0, 0, 0);
-      for (let i = 0; i < cols.length; i++) {
-        page.drawText(cols[i], { x, y, size, font: fontToUse, color });
-        x += widths[i];
-      }
-      y -= lineHeight;
-    }
-
-    page.drawText(`Daglig Kryptomarked Rapport – ${new Date().toISOString().split('T')[0]}`, { x: marginLeft, y, size: 16, font: fontBold, color: rgb(0, 0, 0) });
-    y -= lineHeight * 2;
-
-    drawText('Kryptopriser og 24t endring:', { size: 14, bold: true });
-    y -= 4;
-
-    const coinsSymbols = {
+    // Bygg kryptotabell
+    const coinSymbols = {
       bitcoin: 'BTC',
       ethereum: 'ETH',
       'injective-protocol': 'INJ',
       'fetch-ai': 'FET',
       dogecoin: 'DOGE',
       ripple: 'XRP',
-      solana: 'SOL'
+      solana: 'SOL',
     };
 
-    drawTableRow(['Valuta', 'Pris USD', '24t Endring'], [80, 120, 120], { bold: true });
-
-    coins.forEach(id => {
-      const symbol = coinsSymbols[id] || id.toUpperCase();
-      const price = cryptoPrices[id]?.usd != null
-        ? `$${cryptoPrices[id].usd.toLocaleString()}`
-        : "N/A";
-      const change = cryptoPrices[id]?.usd_24h_change != null
-        ? `${cryptoPrices[id].usd_24h_change.toFixed(2)}%`
-        : "N/A";
-      drawTableRow([symbol, price, change], [80, 120, 120]);
+    const cryptoRows = coins.map((id) => {
+      const price = cryptoPrices[id]?.usd != null ? `$${cryptoPrices[id].usd.toLocaleString()}` : "N/A";
+      const change = cryptoPrices[id]?.usd_24h_change != null ? `${cryptoPrices[id].usd_24h_change.toFixed(2)}%` : "N/A";
+      return [coinSymbols[id], price, change];
     });
 
-    y -= lineHeight;
+    y = drawTable(
+      page,
+      helvetica,
+      ['Symbol', 'Pris', '24t Endring'],
+      cryptoRows,
+      marginX,
+      y,
+      [60, 120, 100],
+      20,
+      12
+    );
 
-    drawText('Markedsindikatorer (nåværende verdier):', { size: 14, bold: true });
-    y -= 4;
+    y -= 10;
+    page.drawText('Markedsindikatorer:', { x: marginX, y, size: 14, font: helveticaBold });
+    y -= 20;
 
-    drawTableRow(['Indikator', 'Verdi'], [200, 100], { bold: true });
-    drawTableRow(['Fear & Greed Index', fearGreedIndex.current ? `${fearGreedIndex.current.value} (${fearGreedIndex.current.classification})` : 'N/A'], [200, 100]);
-    drawTableRow(['VIX Index', vixValue.current != null ? vixValue.current.toFixed(2) : 'N/A'], [200, 100]);
-    drawTableRow(['BTC Dominance', btcDominance.current != null ? `${btcDominance.current.toFixed(2)}%` : 'N/A'], [200, 100]);
-
-    y -= lineHeight;
-
-    drawText('Utvikling i Markedsindikatorer:', { size: 14, bold: true });
-    y -= 4;
-
-    drawTableRow(['Indikator', '1 Dag', '7 Dager', '30 Dager'], [150, 100, 100, 100], { bold: true });
-
-    const fngChanges = fearGreedIndex.history.map(h => h.value);
-    const fngCurrent = fearGreedIndex.current ? fearGreedIndex.current.value : null;
-    const fngDayChange = formatPercentChange(fngCurrent, fngChanges[0]);
-    const fngWeekChange = formatPercentChange(fngCurrent, fngChanges[1]);
-    const fngMonthChange = formatPercentChange(fngCurrent, fngChanges[2]);
-    drawTableRow(['Fear & Greed Index', fngDayChange, fngWeekChange, fngMonthChange], [150, 100, 100, 100]);
-
-    const vixChanges = vixValue.history.map(h => h.value);
-    const vixCurrent = vixValue.current;
-    const vixDayChange = formatPercentChange(vixCurrent, vixChanges[0]);
-    const vixWeekChange = formatPercentChange(vixCurrent, vixChanges[1]);
-    const vixMonthChange = formatPercentChange(vixCurrent, vixChanges[2]);
-    drawTableRow(['VIX Index', vixDayChange, vixWeekChange, vixMonthChange], [150, 100, 100, 100]);
-
-    const btcDomChanges = btcDominance.history.map(h => h.value);
-    const btcDomCurrent = btcDominance.current;
-    const btcDomDayChange = formatPercentChange(btcDomCurrent, btcDomChanges[0]);
-    const btcDomWeekChange = formatPercentChange(btcDomCurrent, btcDomChanges[1]);
-    const btcDomMonthChange = formatPercentChange(btcDomCurrent, btcDomChanges[2]);
-    drawTableRow(['BTC Dominance', btcDomDayChange, btcDomWeekChange, btcDomMonthChange], [150, 100, 100, 100]);
-
-    y -= lineHeight;
-
-    drawText('Analytikeranbefalinger:', { size: 14, bold: true });
-    y -= 4;
-    drawTableRow(['Valuta', 'Buy', 'Hold', 'Sell'], [80, 80, 80, 80], { bold: true });
-    Object.entries(analystTable).forEach(([sym, rec]) => {
-      drawTableRow([sym, rec.Buy.toString(), rec.Hold.toString(), rec.Sell.toString()], [80, 80, 80, 80]);
-    });
-
-    y -= lineHeight;
-
-    drawText('Generell Fremtidsanalyse:', { size: 14, bold: true });
-    y -= 4;
-
-    const futureEvents = [
-      {
-        date: '2025-09-30',
-        event: 'Ethereum Shanghai Upgrade',
-        description: 'Forventet oppgradering som muliggjør uttak av stake fra Ethereum 2.0. Kan øke likviditeten og senke prispresset. Hvis vellykket kan dette føre til prisoppgang, men hvis oppgraderingen forsinkes kan usikkerhet gi negativt press.'
-      },
-      {
-        date: '2025-11-15',
-        event: 'SEC beslutning om BTC ETF godkjenning',
-        description: 'US Securities and Exchange Commission kan godkjenne eller avvise Bitcoin ETF. Godkjenning kan åpne markedet for institusjonelle investorer og presse prisen opp. Avvisning kan skape negativt sentiment.'
-      },
-      {
-        date: '2025-12-01',
-        event: 'Bitcoin halving forberedelser',
-        description: 'Forventninger om halvering av blokkbelønning kan drive spekulasjon og prisvolatilitet. Historisk har halveringer ført til langvarig bullmarked, men kortsiktig kan det skape usikkerhet.'
-      }
+    // Markedsindikatorer med utvikling siste dag/uke/mnd
+    const marketRows = [
+      ['Fear & Greed Index', `${fearGreedIndex.value} (${fearGreedIndex.classification})`, fearGreedIndex.change.day, fearGreedIndex.change.week, fearGreedIndex.change.month],
+      ['VIX Index', vixValue.current, vixValue.change.day, vixValue.change.week, vixValue.change.month],
+      ['BTC Dominance', btcDominance.current, btcDominance.change.day, btcDominance.change.week, btcDominance.change.month],
     ];
 
-    futureEvents.forEach(ev => {
-      drawText(`- ${ev.date} — ${ev.event}:`, { bold: true, size: 12 });
-      drawText(ev.description, { size: 11 });
-      y -= 4;
+    y = drawTable(
+      page,
+      helvetica,
+      ['Indikator', 'Nåværende', 'Siste dag', 'Siste uke', 'Siste måned'],
+      marketRows,
+      marginX,
+      y,
+      [160, 100, 70, 70, 70],
+      20,
+      12
+    );
+
+    y -= 15;
+    page.drawText('Analytikeranbefalinger pr. valuta:', { x: marginX, y, size: 14, font: helveticaBold });
+    y -= 20;
+
+    // Anbefalingstabell
+    const analystRows = Object.entries(analystTable).map(([symbol, counts]) => {
+      const total = counts.Buy + counts.Hold + counts.Sell;
+      const maxType = Object.entries(counts).reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+      const maxPercent = ((counts[maxType] / total) * 100).toFixed(1);
+      return [
+        symbol,
+        total.toString(),
+        counts.Buy.toString(),
+        counts.Hold.toString(),
+        counts.Sell.toString(),
+        `${maxType.toUpperCase()} (${maxPercent}%)`,
+      ];
     });
 
-    if (errors.length) {
-      drawText('Advarsler / Feilmeldinger:', { size: 12, bold: true, color: rgb(1, 0, 0) });
-      errors.forEach(errMsg => {
-        drawText(errMsg, { size: 10, color: rgb(1, 0, 0) });
+    y = drawTable(
+      page,
+      helvetica,
+      ['Symbol', 'Antall analyser', 'Kjøp', 'Hold', 'Selg', 'Flest anbefaler'],
+      analystRows,
+      marginX,
+      y,
+      [50, 80, 50, 50, 50, 140],
+      20,
+      12
+    );
+
+    y -= 20;
+    page.drawText('Generell Fremtidsanalyse og viktige datoer:', { x: marginX, y, size: 14, font: helveticaBold });
+    y -= 18;
+
+    // Fremtidsanalyse tekst, bryt linjer
+    const futureText = `- ETF-godkjenninger i USA forventes i Q3 2025. Positivt for institusjonell adopsjon og kan løfte markedet.  
+- EU regulatoriske forslag (MiCA) trer i kraft 1. januar 2026. Strengere regulering kan føre til midlertidig volatilitet, men økt tillit på sikt.  
+- Mulig renteheving fra FED 17. september 2025 kan påvirke likviditet i markedet negativt, hvilket kan gi kortsiktig nedgang i kryptomarkedet.  
+- Bitcoin halvering forventes i april 2024. Historisk har dette initiert bullish trender for BTC og altcoins.  
+- Geopolitiske spenninger og makroøkonomiske data bør overvåkes nøye da de kan øke volatilitet og påvirke risikoappetitt.  
+- Dersom ETF-godkjenninger uteblir, eller regulatoriske tiltak blir strengere enn ventet, kan det føre til nedgang og økt usikkerhet.  
+- Godkjenning av ETF og positive regulatoriske signaler kan føre til kraftig oppgang og økt kapitalinnstrømning.`;
+
+    y = drawWrappedText(page, helvetica, futureText, marginX, y, maxWidth, 11, rgb(0, 0, 0), 14);
+
+    // Feilmeldinger nederst (om noen)
+    if (errors.length > 0) {
+      y -= 20;
+      page.drawText('Feil ved datainnhenting:', { x: marginX, y, size: 12, font: helveticaBold, color: rgb(1, 0, 0) });
+      y -= 14;
+      errors.forEach((err) => {
+        y = drawWrappedText(page, helvetica, `- ${err}`, marginX, y, maxWidth, 10, rgb(1, 0, 0), 12);
       });
     }
 
     const pdfBytes = await pdfDoc.save();
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename=crypto_report.pdf');
-    res.send(Buffer.from(pdfBytes));
-  } catch (error) {
-    res.status(500).json({ error: error.message || 'Ukjent feil' });
+    res.setHeader('Content-Disposition', 'inline; filename=DagligKryptoRapport.pdf');
+    res.status(200).send(Buffer.from(pdfBytes));
+
+  } catch (err) {
+    // Siste failsafe: lag enkel PDF med feilmelding
+    const pdfDoc = await PDFDocument.create();
+    const page = pdfDoc.addPage([595, 842]);
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    page.drawText(`Rapportgenerering feilet: ${err.message}`, { x: 50, y: 800, size: 12, font, color: rgb(1, 0, 0) });
+    const pdfBytes = await pdfDoc.save();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename=Feilrapport.pdf');
+    res.status(500).send(Buffer.from(pdfBytes));
   }
 }
