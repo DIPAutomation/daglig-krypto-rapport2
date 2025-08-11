@@ -49,6 +49,15 @@ export default async function handler(req, res) {
     SOL: "Buy"
   };
 
+  // Oppsummering av anbefalinger
+  const counts = { Buy: 0, Hold: 0, Sell: 0 };
+  Object.values(analystTable).forEach(rec => {
+    if (counts[rec] != null) counts[rec]++;
+  });
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const maxType = Object.entries(counts).reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+  const maxPercent = total > 0 ? ((counts[maxType] / total) * 100).toFixed(1) : 0;
+
   // Lag PDF
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([595, 842]);
@@ -71,25 +80,4 @@ export default async function handler(req, res) {
                    symbol.toLowerCase() === 'doge' ? 'dogecoin' :
                    symbol.toLowerCase() === 'xrp' ? 'ripple' :
                    symbol.toLowerCase() === 'sol' ? 'solana' : '';
-    const price = cryptoPrices[coinId]?.usd != null ? `$${cryptoPrices[coinId].usd.toLocaleString()}` : "N/A";
-    const change = cryptoPrices[coinId]?.usd_24h_change != null ? `${cryptoPrices[coinId].usd_24h_change.toFixed(2)}%` : "N/A";
-    drawLine(`${symbol}: Pris ${price} | 24t Endring: ${change} | Anbefaling: ${recommendation}`);
-  });
-
-  drawLine('');
-  drawLine('Markedsindikatorer:');
-  drawLine(`Fear & Greed Index: ${fearGreedIndex}`);
-  drawLine(`VIX Index: ${vixValue}`);
-  drawLine(`BTC Dominance: ${btcDominance}`);
-
-  drawLine('');
-  drawLine('Generell Fremtidsanalyse:');
-  drawLine('Altcoins viser styrke, spesielt etter ETF-godkjenninger.');
-  drawLine('Institusjonell interesse er stigende.');
-  drawLine('Regulatoriske nyheter kan utløse volatilitet.');
-
-  const pdfBytes = await pdfDoc.save();
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', 'inline; filename=DagligKryptoRapport.pdf');
-  res.status(200).send(Buffer.from(pdfBytes));
-}
+    const price = cryptoPrices
