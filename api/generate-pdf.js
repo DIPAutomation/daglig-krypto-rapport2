@@ -14,31 +14,6 @@ async function fetchWithTimeout(url, options = {}, timeout = 6000) {
   }
 }
 
-function drawWrappedText(page, font, text, x, y, maxWidth, size, color = rgb(0, 0, 0), lineHeight = 14) {
-  const paragraphs = text.split('\n');
-  for (const paragraph of paragraphs) {
-    let words = paragraph.split(' ');
-    let line = '';
-    for (let n = 0; n < words.length; n++) {
-      const testLine = line + words[n] + ' ';
-      const testWidth = font.widthOfTextAtSize(testLine, size);
-      if (testWidth > maxWidth && n > 0) {
-        page.drawText(line.trim(), { x, y, size, font, color });
-        y -= lineHeight;
-        line = words[n] + ' ';
-      } else {
-        line = testLine;
-      }
-    }
-    if (line) {
-      page.drawText(line.trim(), { x, y, size, font, color });
-      y -= lineHeight;
-    }
-    y -= lineHeight / 2;
-  }
-  return y;
-}
-
 function drawTable(page, font, headers, rows, startX, startY, colWidths, rowHeight, fontSize) {
   let y = startY;
   const black = rgb(0, 0, 0);
@@ -71,23 +46,6 @@ function drawTable(page, font, headers, rows, startX, startY, colWidths, rowHeig
   return y;
 }
 
-async function fetchHistoricalChange(id, days) {
-  try {
-    const res = await fetchWithTimeout(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}`, {}, 6000);
-    if (!res) return 'N/A';
-    const data = await res.json();
-    if (data?.prices && data.prices.length > 1) {
-      const startPrice = data.prices[0][1];
-      const endPrice = data.prices[data.prices.length - 1][1];
-      const change = ((endPrice - startPrice) / startPrice) * 100;
-      return (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
-    }
-  } catch {
-    return 'N/A';
-  }
-  return 'N/A';
-}
-
 export default async function handler(req, res) {
   try {
     const coins = ['bitcoin', 'ethereum', 'injective-protocol', 'fetch-ai', 'dogecoin', 'ripple', 'solana'];
@@ -101,72 +59,19 @@ export default async function handler(req, res) {
       solana: 'SOL',
     };
 
-    // Først hent priser + markedsdata parallelt med 6s timeout
-    const priceRes = await fetchWithTimeout(`https://api.coingecko.com/api/v3/simple/price?ids=${coins.join(',')}&vs_currencies=usd&include_market_cap=true&include_24hr_change=true`, {}, 6000);
-    const globalRes = await fetchWithTimeout('https://api.coingecko.com/api/v3/global', {}, 6000);
-    const fngRes = await fetchWithTimeout('https://api.alternative.me/fng/', {}, 6000);
-    const vixRes = await fetchWithTimeout('https://query1.finance.yahoo.com/v8/finance/chart/^VIX?range=1mo&interval=1d', {}, 6000);
-
+    // Kun hent dagens pris og 24h endring
+    const priceRes = await fetchWithTimeout(`https://api.coingecko.com/api/v3/simple/price?ids=${coins.join(',')}&vs_currencies=usd&include_24hr_change=true`, {}, 6000);
     const cryptoPrices = priceRes ? await priceRes.json() : {};
-    const globalData = globalRes ? await globalRes.json() : null;
-    const fngData = fngRes ? await fngRes.json() : null;
-    const vixData = vixRes ? await vixRes.json() : null;
 
-    // Så hent historisk utvikling for hver coin parallelt med 6s timeout
-    const cryptoChangesPromises = coins.map((coin) =>
-      Promise.all([
-        fetchHistoricalChange(coin, 1),
-        fetchHistoricalChange(coin, 7),
-        fetchHistoricalChange(coin, 30),
-      ])
-    );
-
-    const cryptoChangesArr = await Promise.all(cryptoChangesPromises);
-
-    const cryptoChanges = {};
-    coins.forEach((coin, i) => {
-      cryptoChanges[coin] = {
-        day: cryptoChangesArr[i][0],
-        week: cryptoChangesArr[i][1],
-        month: cryptoChangesArr[i][2],
-      };
-    });
-
-    const fearGreedIndex = {
-      current: fngData?.data?.[0]?.value ?? 'N/A',
-      classification: fngData?.data?.[0]?.value_classification ?? 'N/A',
-    };
-
-    const btcDominance = globalData?.data?.market_cap_percentage?.btc ? globalData.data.market_cap_percentage.btc.toFixed(2) + '%' : 'N/A';
-
-    const vixPrices = vixData?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
-    const vixCurrent = vixPrices.length ? vixPrices[vixPrices.length - 1].toFixed(2) : 'N/A';
-
-    // Statisk analytikeranbefaling
-    const analystTable = {
-      BTC: { Buy: 3, Hold: 3, Sell: 1 },
-      ETH: { Buy: 4, Hold: 2, Sell: 1 },
-      INJ: { Buy: 5, Hold: 1, Sell: 1 },
-      FET: { Buy: 2, Hold: 4, Sell: 1 },
-      DOGE: { Buy: 1, Hold: 3, Sell: 3 },
-      XRP: { Buy: 2, Hold: 4, Sell: 1 },
-      SOL: { Buy: 4, Hold: 2, Sell: 1 },
-    };
-
-    // Lag PDF
     const pdfDoc = await PDFDocument.create();
-    const page1 = pdfDoc.addPage([595, 842]); // A4
-    const page2 = pdfDoc.addPage([595, 842]); // A4
-
+    const page1 = pdfDoc.addPage([595, 842]);
     const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
     const marginX = 40;
     let y = 820;
-    const maxWidth = 515;
 
-    // --- SIDE 1 ---
-    page1.drawText(`Daglig Kryptomarked Rapport – ${new Date().toISOString().split('T')[0]}`, {
+    page1.drawText(`Kryptomarked Rapport – ${new Date().toISOString().split('T')[0]}`, {
       x: marginX,
       y,
       size: 18,
@@ -175,99 +80,26 @@ export default async function handler(req, res) {
     });
     y -= 35;
 
-    page1.drawText('Kryptopriser (USD) og utvikling:', { x: marginX, y, size: 14, font: helveticaBold });
+    page1.drawText('Kryptopriser (USD) og 24h endring:', { x: marginX, y, size: 14, font: helveticaBold });
     y -= 22;
 
     const cryptoRows = coins.map((id) => {
       const price = cryptoPrices[id]?.usd != null ? `$${cryptoPrices[id].usd.toLocaleString()}` : 'N/A';
-      const dayCh = cryptoChanges[id]?.day ?? 'N/A';
-      const weekCh = cryptoChanges[id]?.week ?? 'N/A';
-      const monthCh = cryptoChanges[id]?.month ?? 'N/A';
-      return [coinSymbols[id], price, dayCh, weekCh, monthCh];
+      const change = cryptoPrices[id]?.usd_24h_change != null ? `${cryptoPrices[id].usd_24h_change.toFixed(2)}%` : 'N/A';
+      return [coinSymbols[id], price, change];
     });
 
     y = drawTable(
       page1,
       helvetica,
-      ['Symbol', 'Pris', 'Endring 1 dag', 'Endring 1 uke', 'Endring 1 måned'],
+      ['Symbol', 'Pris', 'Endring 24 timer'],
       cryptoRows,
       marginX,
       y,
-      [50, 100, 100, 100, 100],
+      [60, 120, 120],
       20,
       12
     );
-
-    y -= 15;
-
-    page1.drawText('Markedsindikatorer:', { x: marginX, y, size: 14, font: helveticaBold });
-    y -= 22;
-
-    const marketRows = [
-      ['Fear & Greed Index', `${fearGreedIndex.current} (${fearGreedIndex.classification})`, 'N/A', 'N/A', 'N/A'],
-      ['BTC Dominance', btcDominance, 'N/A', 'N/A', 'N/A'],
-      ['VIX Index', vixCurrent, 'N/A', 'N/A', 'N/A'],
-    ];
-
-    y = drawTable(
-      page1,
-      helvetica,
-      ['Indikator', 'Nåverdi', 'Endring 1 dag', 'Endring 1 uke', 'Endring 1 måned'],
-      marketRows,
-      marginX,
-      y,
-      [200, 120, 65, 65, 65],
-      20,
-      12
-    );
-
-    // --- SIDE 2 ---
-    let y2 = 820;
-    page2.drawText('Analytikeranbefalinger pr. valuta:', { x: marginX, y: y2, size: 14, font: helveticaBold });
-    y2 -= 22;
-
-    const analystRows = Object.entries(analystTable).map(([symbol, counts]) => {
-      const total = counts.Buy + counts.Hold + counts.Sell;
-      const maxType = Object.entries(counts).reduce((a, b) => (b[1] > a[1] ? b : a))[0];
-      const maxPercent = ((counts[maxType] / total) * 100).toFixed(1);
-      return [
-        symbol,
-        total.toString(),
-        counts.Buy.toString(),
-        counts.Hold.toString(),
-        counts.Sell.toString(),
-        `${maxType.toUpperCase()} (${maxPercent}%)`,
-      ];
-    });
-
-    y2 = drawTable(
-      page2,
-      helvetica,
-      ['Symbol', 'Antall analyser', 'Buy', 'Hold', 'Sell', 'Største konsensus'],
-      analystRows,
-      marginX,
-      y2,
-      [50, 90, 50, 50, 50, 120],
-      20,
-      12
-    );
-
-    y2 -= 20;
-
-    const analysisText = `Tolkning av markedsindikatorer og makroøkonomi:
-
-Fear & Greed Index nærmer seg ekstrem frykt, noe som ofte kan indikere kjøpsmuligheter.
-BTC Dominance viser fortsatt dominans i markedet.
-VIX-indeksen indikerer økt volatilitet i aksjemarkedet, som ofte korrelerer med kryptomarkedet.
-
-Generell fremtidsanalyse:
-Viktige kommende hendelser som OMC rentemøte i USA kan gi signaler om pengepolitikk.
-Q4 2025: Flere store blockchain-oppgraderinger forventes, som kan skape volatilitet.
-2026: Mulig økt regulering i EU og USA.
-
-Disse datoene kan ha stor betydning for markedets retning og bør følges nøye.`;
-
-    y2 = drawWrappedText(page2, helvetica, analysisText, marginX, y2, maxWidth, 12);
 
     const pdfBytes = await pdfDoc.save();
 
