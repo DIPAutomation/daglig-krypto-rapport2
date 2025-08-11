@@ -10,9 +10,7 @@ export default async function handler(req, res) {
     // CoinGecko priser
     const coins = ['bitcoin', 'ethereum', 'injective-protocol', 'fetch-ai', 'dogecoin', 'ripple', 'solana'];
     const cgRes = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${coins.join(',')}&vs_currencies=usd&include_market_cap=true&include_24hr_change=true`);
-    if (cgRes.ok) {
-      cryptoPrices = await cgRes.json();
-    }
+    if (cgRes.ok) cryptoPrices = await cgRes.json();
 
     // Fear & Greed
     const fgRes = await fetch('https://api.alternative.me/fng/');
@@ -44,77 +42,20 @@ export default async function handler(req, res) {
     console.error("Feil under datainnhenting:", err);
   }
 
-  // Analytikervurderinger
-  const analystTable = {
-    BTC: "Hold",
-    ETH: "Buy",
-    INJ: "Buy",
-    FET: "Hold",
-    DOGE: "Sell",
-    XRP: "Hold",
-    SOL: "Buy"
+  // Dummy analytikertall per coin
+  const analystStats = {
+    BTC: { total: 7, buy: 3, hold: 3, sell: 1 },
+    ETH: { total: 6, buy: 4, hold: 1, sell: 1 },
+    INJ: { total: 5, buy: 3, hold: 2, sell: 0 },
+    FET: { total: 4, buy: 1, hold: 3, sell: 0 },
+    DOGE: { total: 6, buy: 1, hold: 2, sell: 3 },
+    XRP: { total: 5, buy: 2, hold: 3, sell: 0 },
+    SOL: { total: 6, buy: 4, hold: 1, sell: 1 }
   };
 
-  // Oppsummering av anbefalinger
-  const counts = { Buy: 0, Hold: 0, Sell: 0 };
-  Object.values(analystTable).forEach(rec => {
-    if (counts[rec] != null) counts[rec]++;
-  });
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  const [maxType, maxValue] = Object.entries(counts).reduce((a, b) => (b[1] > a[1] ? b : a), ["N/A", 0]);
-  const maxPercent = total > 0 ? ((maxValue / total) * 100).toFixed(1) : "0.0";
-
-  // Lag PDF
-  const pdfDoc = await PDFDocument.create();
-  const page = pdfDoc.addPage([595, 842]);
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  let y = 780;
-  const drawLine = (text, size = 12) => {
-    page.drawText(String(text), { x: 50, y, size, font, color: rgb(0, 0, 0) });
-    y -= 18;
-  };
-
-  drawLine(`Daglig Kryptomarked Rapport – ${new Date().toISOString().split('T')[0]}`, 14);
-  drawLine('');
-  drawLine('Kryptopriser og Analyse:');
-
-  Object.entries(analystTable).forEach(([symbol, recommendation]) => {
-    const coinId = symbol.toLowerCase() === 'btc' ? 'bitcoin' :
-                   symbol.toLowerCase() === 'eth' ? 'ethereum' :
-                   symbol.toLowerCase() === 'inj' ? 'injective-protocol' :
-                   symbol.toLowerCase() === 'fet' ? 'fetch-ai' :
-                   symbol.toLowerCase() === 'doge' ? 'dogecoin' :
-                   symbol.toLowerCase() === 'xrp' ? 'ripple' :
-                   symbol.toLowerCase() === 'sol' ? 'solana' : '';
-    const priceVal = cryptoPrices[coinId]?.usd;
-    const price = priceVal != null ? `$${Number(priceVal).toLocaleString()}` : "N/A";
-    const changeVal = cryptoPrices[coinId]?.usd_24h_change;
-    const change = changeVal != null ? `${Number(changeVal).toFixed(2)}%` : "N/A";
-    drawLine(`${symbol}: Pris ${price} | 24t Endring: ${change} | Anbefaling: ${recommendation}`);
-  });
-
-  drawLine('');
-  drawLine('Markedsindikatorer:');
-  drawLine(`Fear & Greed Index: ${fearGreedIndex}`);
-  drawLine(`VIX Index: ${vixValue}`);
-  drawLine(`BTC Dominance: ${btcDominance}`);
-
-  drawLine('');
-  drawLine('Oppsummering av analytikernes anbefalinger:');
-  drawLine(`Totalt analyserte: ${total}`);
-  drawLine(`- Kjøp (Buy): ${counts.Buy}`);
-  drawLine(`- Hold: ${counts.Hold}`);
-  drawLine(`- Selg (Sell): ${counts.Sell}`);
-  drawLine(`Flest anbefaler: ${maxType} (${maxPercent}% av totalen)`);
-
-  drawLine('');
-  drawLine('Generell Fremtidsanalyse:');
-  drawLine('Altcoins viser styrke, spesielt etter ETF-godkjenninger.');
-  drawLine('Institusjonell interesse er stigende.');
-  drawLine('Regulatoriske nyheter kan utløse volatilitet.');
-
-  const pdfBytes = await pdfDoc.save();
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', 'inline; filename=DagligKryptoRapport.pdf');
-  res.status(200).send(Buffer.from(pdfBytes));
-}
+  const findMajority = (stats) => {
+    const entries = [
+      { type: "BUY", value: stats.buy },
+      { type: "HOLD", value: stats.hold },
+      { type: "SELL", value: stats.sell }
+    ];
