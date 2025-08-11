@@ -14,6 +14,28 @@ async function fetchWithTimeout(url, options = {}, timeout = 3000) {
   }
 }
 
+// Funksjon for å bryte tekst i flere linjer basert på maks bredde (pixels)
+function wrapText(text, font, fontSize, maxWidth) {
+  const words = text.split(' ');
+  const lines = [];
+  let currentLine = '';
+
+  for (const word of words) {
+    const testLine = currentLine ? currentLine + ' ' + word : word;
+    const testLineWidth = font.widthOfTextAtSize(testLine, fontSize);
+    if (testLineWidth > maxWidth && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = testLine;
+    }
+  }
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+  return lines;
+}
+
 export default async function handler(req, res) {
   try {
     const errors = [];
@@ -87,22 +109,30 @@ export default async function handler(req, res) {
     const pdfDoc = await PDFDocument.create();
     let page = pdfDoc.addPage([595, 842]);
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const fontSize = 12;
+    const marginX = 50;
+    const maxWidth = 595 - marginX * 2; // maks bredde innenfor marger
     let y = 780;
+    const lineHeight = 18;
 
-    const drawLine = (text, size = 12, color = rgb(0, 0, 0)) => {
-      if (y < 40) { // ny side ved behov
-        page = pdfDoc.addPage([595, 842]);
-        y = 800;
+    // Tegn tekst med wrapping og paginering
+    function drawWrappedText(text, size = fontSize, color = rgb(0, 0, 0)) {
+      const lines = wrapText(text, font, size, maxWidth);
+      for (const line of lines) {
+        if (y < 40) { // ny side
+          page = pdfDoc.addPage([595, 842]);
+          y = 800;
+        }
+        page.drawText(line, { x: marginX, y, size, font, color });
+        y -= lineHeight;
       }
-      page.drawText(text, { x: 50, y, size, font, color });
-      y -= 18;
-    };
+    }
 
-    drawLine(`Daglig Kryptomarked Rapport – ${new Date().toISOString().split('T')[0]}`, 14);
-    drawLine('');
+    drawWrappedText(`Daglig Kryptomarked Rapport – ${new Date().toISOString().split('T')[0]}`, 14);
+    drawWrappedText('');
 
     // Kryptopriser
-    drawLine('Kryptopriser og Analyse:');
+    drawWrappedText('Kryptopriser og Analyse:');
     coins.forEach((id) => {
       const symbol = id === 'bitcoin' ? 'BTC' :
                      id === 'ethereum' ? 'ETH' :
@@ -117,70 +147,60 @@ export default async function handler(req, res) {
       const change = cryptoPrices[id]?.usd_24h_change != null
         ? `${cryptoPrices[id].usd_24h_change.toFixed(2)}%`
         : "N/A";
-      drawLine(`${symbol}: Pris ${price} | 24t Endring: ${change}`);
+      drawWrappedText(`${symbol}: Pris ${price} | 24t Endring: ${change}`);
     });
 
-    drawLine('');
-    drawLine('Markedsindikatorer:');
-    drawLine(`Fear & Greed Index: ${fearGreedIndex}`);
-    drawLine(`VIX Index: ${vixValue}`);
-    drawLine(`BTC Dominance: ${btcDominance}`);
+    drawWrappedText('');
+    drawWrappedText('Markedsindikatorer:');
+    drawWrappedText(`Fear & Greed Index: ${fearGreedIndex}`);
+    drawWrappedText(`VIX Index: ${vixValue}`);
+    drawWrappedText(`BTC Dominance: ${btcDominance}`);
 
     // Tillegg: Forklaring og tolkning av indikatorer
-    drawLine('');
-    drawLine('Tolkning av Markedsindikatorer:');
-    drawLine('Fear & Greed Index reflekterer markedssentiment. Høye verdier (70+) tyder på grådighet og mulig topp før korreksjon.');
-    drawLine('Lave verdier (30-) signaliserer frykt og kan være gode kjøpsmuligheter i kryptomarkedet.');
-    drawLine('VIX, også kalt "fryktindeksen" for aksjemarkedet, måler forventet volatilitet. Høy VIX kan trekke kapital ut av risikofylte aktiva som krypto.');
-    drawLine('Når VIX stiger, øker risikoaversjonen, noe som ofte gir lavere kryptopriser på kort sikt.');
-    drawLine('');
-    drawLine('BTC Dominans beskriver hvor stor andel av total kryptomarkedsverdi Bitcoin utgjør.');
-    drawLine('Økende dominans kan tyde på at kapital trekkes ut av altcoins og samles i Bitcoin, ofte i usikre tider.');
-    drawLine('Synkende dominans indikerer økt interesse for altcoins, typisk i bull-markeder når risikoappetitten øker.');
-    drawLine('Dette gir investorer hint om når man bør justere allokering mellom BTC og altcoins.');
+    drawWrappedText('');
+    drawWrappedText('Tolkning av Markedsindikatorer:');
+    drawWrappedText('Fear & Greed Index reflekterer markedssentiment. Høye verdier (70+) tyder på grådighet og mulig topp før korreksjon.');
+    drawWrappedText('Lave verdier (30-) signaliserer frykt og kan være gode kjøpsmuligheter i kryptomarkedet.');
+    drawWrappedText('VIX, også kalt "fryktindeksen" for aksjemarkedet, måler forventet volatilitet. Høy VIX kan trekke kapital ut av risikofylte aktiva som krypto.');
+    drawWrappedText('Når VIX stiger, øker risikoaversjonen, noe som ofte gir lavere kryptopriser på kort sikt.');
+    drawWrappedText('');
+    drawWrappedText('BTC Dominans beskriver hvor stor andel av total kryptomarkedsverdi Bitcoin utgjør.');
+    drawWrappedText('Økende dominans kan tyde på at kapital trekkes ut av altcoins og samles i Bitcoin, ofte i usikre tider.');
+    drawWrappedText('Synkende dominans indikerer økt interesse for altcoins, typisk i bull-markeder når risikoappetitten øker.');
+    drawWrappedText('Dette gir investorer hint om når man bør justere allokering mellom BTC og altcoins.');
 
     // Analytikertabell
-    drawLine('');
-    drawLine('Analytikeranbefalinger pr. valuta:');
+    drawWrappedText('');
+    drawWrappedText('Analytikeranbefalinger pr. valuta:');
     Object.entries(analystTable).forEach(([symbol, counts]) => {
       const total = counts.Buy + counts.Hold + counts.Sell;
       const maxType = Object.entries(counts).reduce((a, b) => b[1] > a[1] ? b : a)[0];
       const maxPercent = ((counts[maxType] / total) * 100).toFixed(1);
-      drawLine(`${symbol}: analyserte ${total}; Kjøp ${counts.Buy}; Hold ${counts.Hold}; Selg ${counts.Sell}; Flest anbefaler ${maxType.toUpperCase()} (${maxPercent}%)`);
+      drawWrappedText(`${symbol}: analyserte ${total}; Kjøp ${counts.Buy}; Hold ${counts.Hold}; Selg ${counts.Sell}; Flest anbefaler ${maxType.toUpperCase()} (${maxPercent}%)`);
     });
 
     // Makroøkonomisk analyse
-    drawLine('');
-    drawLine('Makroøkonomisk Situasjon og Kryptomarkedet:');
-    drawLine('Globale renter og inflasjon påvirker investorers risikovilje. Strammere pengepolitikk kan redusere kapitaltilgang til risikofylte aktiva.');
-    drawLine('Inflasjonsbekymringer kan samtidig øke interessen for Bitcoin som "digitalt gull".');
-    drawLine('Geopolitiske spenninger øker ofte volatiliteten i kryptomarkedet.');
-    drawLine('Regulatoriske nyheter, spesielt fra USA og EU, er viktige markedsdrivere.');
-    drawLine('ETF-godkjenninger og institusjonell interesse viser modning, men markedet er fortsatt sensitivt for nyheter.');
-    drawLine('Investorer bør være forberedt på raske svingninger og ha klare exit-strategier.');
+    drawWrappedText('');
+    drawWrappedText('Makroøkonomisk Situasjon og Kryptomarkedet:');
+    drawWrappedText('Globale renteendringer, inflasjon og regulatoriske nyheter påvirker kryptomarkedet sterkt.');
+    drawWrappedText('Stigende renter øker alternativkostnaden ved å holde krypto, og kan føre til kapitalflukt til sikrere aktiva.');
+    drawWrappedText('Regulatorisk usikkerhet og lovendringer kan skape volatilitet og raske markedsreaksjoner.');
+    drawWrappedText('Institusjonell interesse, som ETF-godkjenninger, støtter langsiktig vekst i kryptoindustrien.');
+    drawWrappedText('Investorer bør følge med på makrotrender for å justere risikoprofilen i porteføljen.');
 
-    // Investeringsstrategi
-    drawLine('');
-    drawLine('Investeringsstrategi:');
-    drawLine('Bruk Fear & Greed Index og VIX som indikatorer på sentiment og risikoappetitt.');
-    drawLine('Ved høy frykt kan økt eksponering mot BTC og ETH være gunstig.');
-    drawLine('Synkende BTC-dominans og lav frykt kan være et godt tidspunkt for å øke andelen altcoins.');
-    drawLine('Følg nøye med på makroøkonomiske nyheter og regulatoriske endringer.');
-    drawLine('Langsiktige investorer bør fokusere på diversifisering, mens tradere kan utnytte volatilitet.');
-
-    // Fremtidsanalyse (dine eksisterende linjer)
-    drawLine('');
-    drawLine('Generell Fremtidsanalyse:');
-    drawLine('ETF-godkjenninger gir økt institusjonell interesse.');
-    drawLine('Lovforslag om kryptoregulering kan gi store markedsbevegelser.');
-    drawLine('Altcoins viser styrke, men avhenger av makroøkonomi og likviditet.');
-    drawLine('Vær obs på volatilitet rundt store hendelser og nyhetsutslipp.');
+    // Fremtidsanalyse
+    drawWrappedText('');
+    drawWrappedText('Generell Fremtidsanalyse:');
+    drawWrappedText('ETF-godkjenninger gir økt institusjonell interesse.');
+    drawWrappedText('Lovforslag om kryptoregulering kan gi store markedsbevegelser.');
+    drawWrappedText('Altcoins viser styrke, men avhenger av makroøkonomi og likviditet.');
+    drawWrappedText('Vær obs på volatilitet rundt store hendelser og nyhetsutslipp.');
 
     // API-feil
     if (errors.length > 0) {
-      drawLine('');
-      drawLine('Feil ved datainnhenting:', 12, rgb(1, 0, 0));
-      errors.forEach(err => drawLine(`- ${err}`, 10, rgb(1, 0, 0)));
+      drawWrappedText('');
+      drawWrappedText('Feil ved datainnhenting:', 12, rgb(1, 0, 0));
+      errors.forEach(err => drawWrappedText(`- ${err}`, 10, rgb(1, 0, 0)));
     }
 
     const pdfBytes = await pdfDoc.save();
@@ -197,6 +217,6 @@ export default async function handler(req, res) {
     const pdfBytes = await pdfDoc.save();
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename=Feilrapport.pdf');
-    res.status(500).send(Buffer.from(pdfBytes));
+    res.status(200).send(Buffer.from(pdfBytes));
   }
 }
