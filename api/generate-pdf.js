@@ -73,7 +73,7 @@ function drawTable(page, font, headers, rows, startX, startY, colWidths, rowHeig
 
 async function fetchHistoricalChange(id, days) {
   try {
-    const res = await fetchWithTimeout(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}`);
+    const res = await fetchWithTimeout(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}`, {}, 6000);
     if (!res) return 'N/A';
     const data = await res.json();
     if (data?.prices && data.prices.length > 1) {
@@ -101,32 +101,25 @@ export default async function handler(req, res) {
       solana: 'SOL',
     };
 
-    // Hent data parallelt med timeout og fallback
-    const [
-      priceRes,
-      fngRes,
-      globalRes,
-      vixRes,
-    ] = await Promise.all([
-      fetchWithTimeout(`https://api.coingecko.com/api/v3/simple/price?ids=${coins.join(',')}&vs_currencies=usd&include_market_cap=true&include_24hr_change=true`),
-      fetchWithTimeout('https://api.alternative.me/fng/'),
-      fetchWithTimeout('https://api.coingecko.com/api/v3/global'),
-      fetchWithTimeout('https://query1.finance.yahoo.com/v8/finance/chart/^VIX?range=1mo&interval=1d'),
-    ]);
+    // Først hent priser + markedsdata parallelt med 6s timeout
+    const priceRes = await fetchWithTimeout(`https://api.coingecko.com/api/v3/simple/price?ids=${coins.join(',')}&vs_currencies=usd&include_market_cap=true&include_24hr_change=true`, {}, 6000);
+    const globalRes = await fetchWithTimeout('https://api.coingecko.com/api/v3/global', {}, 6000);
+    const fngRes = await fetchWithTimeout('https://api.alternative.me/fng/', {}, 6000);
+    const vixRes = await fetchWithTimeout('https://query1.finance.yahoo.com/v8/finance/chart/^VIX?range=1mo&interval=1d', {}, 6000);
 
     const cryptoPrices = priceRes ? await priceRes.json() : {};
-    const fngData = fngRes ? await fngRes.json() : null;
     const globalData = globalRes ? await globalRes.json() : null;
+    const fngData = fngRes ? await fngRes.json() : null;
     const vixData = vixRes ? await vixRes.json() : null;
 
-    // Hent historisk endring for kryptovalutaer, parallelt og raskt
-    const cryptoChangesPromises = coins.map((coin) => {
-      return Promise.all([
+    // Så hent historisk utvikling for hver coin parallelt med 6s timeout
+    const cryptoChangesPromises = coins.map((coin) =>
+      Promise.all([
         fetchHistoricalChange(coin, 1),
         fetchHistoricalChange(coin, 7),
         fetchHistoricalChange(coin, 30),
-      ]);
-    });
+      ])
+    );
 
     const cryptoChangesArr = await Promise.all(cryptoChangesPromises);
 
@@ -139,7 +132,6 @@ export default async function handler(req, res) {
       };
     });
 
-    // Markedsindikatorer nåverdi
     const fearGreedIndex = {
       current: fngData?.data?.[0]?.value ?? 'N/A',
       classification: fngData?.data?.[0]?.value_classification ?? 'N/A',
@@ -150,7 +142,7 @@ export default async function handler(req, res) {
     const vixPrices = vixData?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
     const vixCurrent = vixPrices.length ? vixPrices[vixPrices.length - 1].toFixed(2) : 'N/A';
 
-    // Analytikeranbefalinger statisk eksempel
+    // Statisk analytikeranbefaling
     const analystTable = {
       BTC: { Buy: 3, Hold: 3, Sell: 1 },
       ETH: { Buy: 4, Hold: 2, Sell: 1 },
@@ -183,7 +175,6 @@ export default async function handler(req, res) {
     });
     y -= 35;
 
-    // Kryptopriser og utvikling
     page1.drawText('Kryptopriser (USD) og utvikling:', { x: marginX, y, size: 14, font: helveticaBold });
     y -= 22;
 
@@ -209,7 +200,6 @@ export default async function handler(req, res) {
 
     y -= 15;
 
-    // Markedsindikatorer
     page1.drawText('Markedsindikatorer:', { x: marginX, y, size: 14, font: helveticaBold });
     y -= 22;
 
@@ -264,7 +254,6 @@ export default async function handler(req, res) {
 
     y2 -= 20;
 
-    // Markedsanalyse tekst (forkortet, kan utvides)
     const analysisText = `Tolkning av markedsindikatorer og makroøkonomi:
 
 Fear & Greed Index nærmer seg ekstrem frykt, noe som ofte kan indikere kjøpsmuligheter.
@@ -280,7 +269,6 @@ Disse datoene kan ha stor betydning for markedets retning og bør følges nøye.
 
     y2 = drawWrappedText(page2, helvetica, analysisText, marginX, y2, maxWidth, 12);
 
-    // Lag PDF-data
     const pdfBytes = await pdfDoc.save();
 
     res.setHeader('Content-Type', 'application/pdf');
