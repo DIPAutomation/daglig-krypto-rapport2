@@ -1,42 +1,47 @@
 // pages/api/kryptorapport.js
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
-const TIMEOUT_MS = 6500; // litt under 7s for å holde total under 10s
-const HEADERS_JSON = { 'Content-Type': 'application/json' };
+// Tuning
+const FETCH_TIMEOUT_MS = 9000; // gi APIene tid, men hold deg innen Vercel-rammer
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutter cache for tregere/sjeldnere kilder
 
-// Abortable fetch med timeout og konsistent feilretur
-async function fetchWithTimeout(url, options = {}, timeout = TIMEOUT_MS) {
+// Enkelt in-memory cache (resettes ved cold start)
+const memCache = {
+  fng: { data: null, ts: 0 },
+  global: { data: null, ts: 0 },
+};
+
+// Abortable fetch med timeout og robust N/A-håndtering
+async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
+  const timer = setTimeout(() => controller.abort(), timeout);
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
-    clearTimeout(id);
+    clearTimeout(timer);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res;
   } catch {
-    clearTimeout(id);
+    clearTimeout(timer);
     return null;
   }
 }
 
-// Sikker tall-format
+// Formattere
 function fmtNum(n, decimals = 2) {
   if (typeof n !== 'number' || isNaN(n)) return 'N/A';
   return n.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals });
 }
-
 function fmtUsd(n) {
   if (typeof n !== 'number' || isNaN(n)) return 'N/A';
   return `$${n.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
 }
-
 function fmtPct(n) {
   if (typeof n !== 'number' || isNaN(n)) return 'N/A';
   const sign = n > 0 ? '+' : '';
   return `${sign}${n.toFixed(2)}%`;
 }
 
-// Robust tekstavbryter
+// Tekst-wrapping
 function wrapText(text, maxWidth, font, fontSize) {
   const lines = [];
   const paragraphs = text.split('\n');
@@ -44,11 +49,9 @@ function wrapText(text, maxWidth, font, fontSize) {
     const words = p.split(' ');
     let line = '';
     for (const word of words) {
-      const testLine = line ? `${line} ${word}` : word;
-      const w = font.widthOfTextAtSize(testLine, fontSize);
-      if (w > maxWidth) {
+      const test = line ? `${line} ${word}` : word;
+      if (font.widthOfTextAtSize(test, fontSize) > maxWidth) {
         if (line) lines.push(line);
-        // hvis enkeltord er for langt, tving det inn
         if (font.widthOfTextAtSize(word, fontSize) > maxWidth) {
           lines.push(word);
           line = '';
@@ -56,7 +59,7 @@ function wrapText(text, maxWidth, font, fontSize) {
           line = word;
         }
       } else {
-        line = testLine;
+        line = test;
       }
     }
     if (line) lines.push(line);
@@ -64,7 +67,7 @@ function wrapText(text, maxWidth, font, fontSize) {
   return lines;
 }
 
-// Enkel tabelltegner (ingen rammer, lett bakgrunn annenhver rad)
+// Enkel tabell
 function drawTable(page, font, headers, rows, startX, startY, colWidths, rowHeight, fontSize) {
   let y = startY;
   const black = rgb(0, 0, 0);
@@ -105,14 +108,16 @@ function drawTable(page, font, headers, rows, startX, startY, colWidths, rowHeig
 
 export const config = {
   api: {
-    bodyParser: false, // minimal overhead
+    bodyParser: false,
   },
 };
 
+// Hvis App Router: vurder å legge dette i /app-route-filen i stedet:
+// export const maxDuration = 15; // hvis prosjektet tillater det [7][16]
+
 export default async function handler(req, res) {
-  // Hard timeout guard for hele requesten (best effort)
-  const controller = new AbortController();
-  const totalTimeout = setTimeout(() => controller.abort(), 9500);
+  const totalAbort = new AbortController();
+  const totalTimer = setTimeout(() => totalAbort.abort(), 9800);
 
   try {
     const coins = ['bitcoin', 'ethereum', 'injective-protocol', 'fetch-ai', 'dogecoin', 'ripple', 'solana'];
@@ -126,141 +131,155 @@ export default async function handler(req, res) {
       solana: 'SOL',
     };
 
-    // Start alle kall parallelt
-    const priceUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${coins.join(',')}&vs_currencies=usd&include_24hr_change=true`;
-    const globalUrl = 'https://api.coingecko.com/api/v3/global';
-    const fngUrl = 'https://api.alternative.me/fng/?limit=8&format=json';
+    // 1) Hovedkall: all coin data i ett kall (inkl. 24h% og 7d%)
+    const marketsUrl = `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${encodeURIComponent(
+      coins.join(',')
+    )}&price_change_percentage=24h,7d`;
 
-    // 7d change via market_chart kun for coins i ett parallelt sett, men hvert kall for seg – begrens til kun nødvendige data
-    const mcUrls = coins.map((id) => `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=7`);
-
-    const fetchPromises = [
-      fetchWithTimeout(priceUrl),
-      fetchWithTimeout(globalUrl),
-      fetchWithTimeout(fngUrl),
-      ...mcUrls.map((u) => fetchWithTimeout(u)),
-    ];
-
-    const results = await Promise.allSettled(fetchPromises);
-
-    let cryptoPrices = {};
-    // prices
-    if (results[0].status === 'fulfilled' && results[0].value) {
+    // 2) BTC-dominanse (global) med cache
+    async function getGlobalCached() {
+      const now = Date.now();
+      if (memCache.global.data && now - memCache.global.ts < CACHE_TTL_MS) {
+        return memCache.global.data;
+      }
+      const res = await fetchWithTimeout('https://api.coingecko.com/api/v3/global');
+      if (!res) return null;
       try {
-        cryptoPrices = await results[0].value.json();
+        const json = await res.json();
+        memCache.global = { data: json, ts: now };
+        return json;
       } catch {
-        cryptoPrices = {};
+        return null;
       }
     }
 
-    // global (btc dominance)
+    // 3) Fear & Greed (limit=8) med cache
+    async function getFngCached() {
+      const now = Date.now();
+      if (memCache.fng.data && now - memCache.fng.ts < CACHE_TTL_MS) {
+        return memCache.fng.data;
+      }
+      const res = await fetchWithTimeout('https://api.alternative.me/fng/?limit=8&format=json');
+      if (!res) return null;
+      try {
+        const json = await res.json();
+        memCache.fng = { data: json, ts: now };
+        return json;
+      } catch {
+        return null;
+      }
+    }
+
+    // Kjør hovedkall parallelt (3 kall totalt)
+    const [marketsRes, globalData, fngData] = await Promise.all([
+      fetchWithTimeout(marketsUrl),
+      getGlobalCached(),
+      getFngCached(),
+    ]);
+
+    // Parse coins/markets
+    // Felter: id, symbol, name, current_price, market_cap, total_volume,
+    // price_change_percentage_24h_in_currency, price_change_percentage_7d_in_currency [1][8][14]
+    let markets = [];
+    if (marketsRes) {
+      try {
+        markets = await marketsRes.json();
+      } catch {
+        markets = [];
+      }
+    }
+
+    // Map for enkel lookup
+    const byId = {};
+    for (const row of markets || []) {
+      byId[row.id] = row;
+    }
+
+    // Global -> BTC dominance
     let btcDominance = null;
-    if (results[1].status === 'fulfilled' && results[1].value) {
-      try {
-        const globalData = await results[1].value.json();
-        btcDominance = globalData?.data?.market_cap_percentage?.btc ?? null;
-      } catch {
-        btcDominance = null;
-      }
+    try {
+      btcDominance = globalData?.data?.market_cap_percentage?.btc ?? null;
+    } catch {
+      btcDominance = null;
     }
 
-    // FNG
-    let fngToday = null, fng1dChange = null, fng7dChange = null;
-    if (results[2].status === 'fulfilled' && results[2].value) {
-      try {
-        const fngData = await results[2].value.json();
-        const arr = fngData?.data ?? [];
-        if (arr.length >= 1) {
-          const v0 = parseFloat(arr[0].value);
-          fngToday = isNaN(v0) ? null : v0;
-        }
-        if (arr.length >= 2 && fngToday !== null) {
-          const v1 = parseFloat(arr[1].value);
-          fng1dChange = isNaN(v1) ? null : fngToday - v1;
-        }
-        if (arr.length >= 8 && fngToday !== null) {
-          const v7 = parseFloat(arr[7].value);
-          fng7dChange = isNaN(v7) ? null : fngToday - v7;
-        }
-      } catch {
-        fngToday = fng1dChange = fng7dChange = null;
+    // FNG -> value, 1d/7d diff
+    let fngToday = null;
+    let fng1dChange = null;
+    let fng7dChange = null;
+    try {
+      const arr = fngData?.data ?? [];
+      if (arr.length >= 1) {
+        const v0 = parseFloat(arr[0].value);
+        fngToday = isNaN(v0) ? null : v0;
       }
+      if (arr.length >= 2 && fngToday !== null) {
+        const v1 = parseFloat(arr[1].value);
+        fng1dChange = isNaN(v1) ? null : fngToday - v1;
+      }
+      if (arr.length >= 8 && fngToday !== null) {
+        const v7 = parseFloat(arr[7].value);
+        fng7dChange = isNaN(v7) ? null : fngToday - v7;
+      }
+    } catch {
+      fngToday = fng1dChange = fng7dChange = null;
     }
 
-    // 7d changes fra market_chart results[3..]
-    const changes7d = {};
-    const mcOffset = 3;
-    for (let i = 0; i < coins.length; i++) {
-      const r = results[mcOffset + i];
-      if (r.status === 'fulfilled' && r.value) {
-        try {
-          const data = await r.value.json();
-          const prices = data?.prices;
-          if (Array.isArray(prices) && prices.length >= 2) {
-            const first = prices[0][1];
-            const last = prices[prices.length - 1][1];
-            const ch = (last - first) / first * 100;
-            changes7d[coins[i]] = ch;
-          } else {
-            changes7d[coins[i]] = null;
-          }
-        } catch {
-          changes7d[coins[i]] = null;
-        }
-      } else {
-        changes7d[coins[i]] = null;
-      }
-    }
-
-    // VIX: valgfritt forsøk via St. Louis FRED proxy (kan feile uten API key) -> sett N/A ved feil.
-    // For å holde stabilitet og <=10s, dropp kall hvis miljøet ikke støtter det.
-    let vixValue = null, vix1dChange = null, vix7dChange = null;
-    // Hvis ønskelig kan dette fjernes helt for 100% stabilitet.
-
-    // Lag PDF
+    // Bygg PDF
     const pdfDoc = await PDFDocument.create();
-    const page1 = pdfDoc.addPage([595, 842]);
     const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
+    // Side 1
+    const page1 = pdfDoc.addPage([595, 842]);
     const marginX = 40;
     let y = 820;
 
-    const title = `Daglig Kryptomarked Rapport – ${new Date().toISOString().slice(0, 10)}`;
-    page1.drawText(title, { x: marginX, y, size: 20, font: helveticaBold, color: rgb(0, 0, 0) });
+    // Tittel
+    page1.drawText(`Daglig Kryptomarked Rapport – ${new Date().toISOString().slice(0, 10)}`, {
+      x: marginX,
+      y,
+      size: 20,
+      font: helveticaBold,
+      color: rgb(0, 0, 0),
+    });
     y -= 40;
 
+    // Pris-tabell (mer data: pris, 24h%, 7d%, market cap, volume)
     page1.drawText('Kryptopriser og utvikling:', { x: marginX, y, size: 14, font: helveticaBold });
     y -= 22;
 
     const priceRows = coins.map((id) => {
-      const symbol = coinSymbols[id];
-      const price = cryptoPrices[id]?.usd ?? null;
-      const change1d = cryptoPrices[id]?.usd_24h_change ?? null;
-      const change7d = typeof changes7d[id] === 'number' ? changes7d[id] : null;
-      return [symbol, fmtUsd(price), fmtPct(change1d), fmtPct(change7d)];
+      const r = byId[id] || {};
+      const symbol = r.symbol ? r.symbol.toUpperCase() : (id in coinSymbols ? coinSymbols[id] : id.toUpperCase());
+      const price = fmtUsd(r.current_price);
+      const ch24 = fmtPct(r.price_change_percentage_24h_in_currency);
+      const ch7d = fmtPct(r.price_change_percentage_7d_in_currency);
+      const mcap = fmtUsd(r.market_cap);
+      const vol = fmtUsd(r.total_volume);
+      return [symbol, price, ch24, ch7d, mcap, vol];
     });
 
     y = drawTable(
       page1,
       helvetica,
-      ['Symbol', 'Pris (USD)', 'Endring 1d', 'Endring 7d'],
+      ['Symbol', 'Pris', 'Endring 24h', 'Endring 7d', 'Markedsverdi', 'Volum 24h'],
       priceRows,
       marginX,
       y,
-      [60, 120, 100, 100],
+      [60, 90, 95, 95, 120, 120],
       20,
       12
     );
     y -= 24;
 
+    // Markedsindikatorer
     page1.drawText('Markedsindikatorer:', { x: marginX, y, size: 14, font: helveticaBold });
     y -= 22;
 
     const marketRows = [
       ['Fear & Greed Index', fngToday !== null ? fmtNum(fngToday, 0) : 'N/A', fng1dChange !== null ? fmtNum(fng1dChange, 0) : 'N/A', fng7dChange !== null ? fmtNum(fng7dChange, 0) : 'N/A'],
       ['BTC Dominance %', btcDominance !== null ? fmtNum(btcDominance, 2) : 'N/A', 'N/A', 'N/A'],
-      ['VIX (volatilitet)', vixValue !== null ? fmtNum(vixValue, 2) : 'N/A', vix1dChange !== null ? fmtNum(vix1dChange, 2) : 'N/A', vix7dChange !== null ? fmtNum(vix7dChange, 2) : 'N/A'],
     ];
 
     y = drawTable(
@@ -279,19 +298,14 @@ export default async function handler(req, res) {
     const page2 = pdfDoc.addPage([595, 842]);
     y = 820;
 
-    page2.drawText('Kommentarer og tolkning:', { x: marginX, y, size: 14, font: helveticaBold });
+    page2.drawText('Kommentarer og forbehold:', { x: marginX, y, size: 14, font: helveticaBold });
     y -= 22;
 
-    // Kort, ikke-spekulativ kommentar uten faste datoer
     const analysisText = `
-Tolkning av indikatorer:
-- Et høyere Fear & Greed-nivå kan reflektere økt risikovilje, mens lavere nivåer ofte indikerer forsiktighet.
-- Økende BTC-dominans kan innebære at kapital flyttes fra altcoins til BTC i usikre perioder.
-- VIX gir et grovt mål på risikosentiment i tradisjonelle markeder; høyere VIX er ofte korrelert med lavere risikotoleranse.
-
-Forbehold:
-- Data kan være forsinket, utilgjengelig eller underlagt rate limits. Verdier som ikke kunne hentes vises som N/A.
-- Rapporten er kun informativ og ikke investeringsråd.
+- Verdier som ikke kunne hentes i tide eller feilet vises som N/A (fail-safe).
+- 24h og 7d endring hentes direkte fra CoinGecko /coins/markets for bedre ytelse og færre timeouts.
+- BTC-dominanse og Fear & Greed caches i 5 minutter for stabilitet.
+- Rapporten er informativ og ikke investeringsråd.
 `.trim();
 
     const fontSize = 12;
@@ -301,37 +315,32 @@ Forbehold:
 
     for (const line of lines) {
       if (y < 60) {
-        page2.drawText('Fortsetter på neste side...', { x: marginX, y: 40, size: 10, font: helvetica });
-        // legg til ny side
-        const nextPage = pdfDoc.addPage([595, 842]);
+        const next = pdfDoc.addPage([595, 842]);
         y = 820;
-        // oppdater referanse til aktiv side
-        // NB: for enkelhet, ikke bruk page2 etter dette punktet
-        nextPage.drawText(line, { x: marginX, y, size: fontSize, font: helvetica });
+        next.drawText(line, { x: marginX, y, size: fontSize, font: helvetica });
         y -= lineHeight;
-        continue;
+      } else {
+        page2.drawText(line, { x: marginX, y, size: fontSize, font: helvetica });
+        y -= lineHeight;
       }
-      page2.drawText(line, { x: marginX, y, size: fontSize, font: helvetica });
-      y -= lineHeight;
     }
 
     const pdfBytes = await pdfDoc.save();
 
-    clearTimeout(totalTimeout);
+    clearTimeout(totalTimer);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename=kryptorapport.pdf');
     res.status(200).send(Buffer.from(pdfBytes));
   } catch (e) {
-    clearTimeout(totalTimeout);
-    res.status(200).setHeader('Content-Type', 'application/pdf');
-
-    // Fallback: returner en enkel PDF med feilmelding (unngå 500 for bedre UX i klienter)
+    clearTimeout(totalTimer);
+    // Fail-safe PDF i stedet for 500
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([595, 842]);
     const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
     page.drawText('Rapportgenerering feilet.', { x: 40, y: 800, size: 18, font: helvetica });
     page.drawText(String(e?.message || e || 'Ukjent feil'), { x: 40, y: 770, size: 12, font: helvetica });
     const pdfBytes = await pdfDoc.save();
+    res.status(200).setHeader('Content-Type', 'application/pdf');
     res.send(Buffer.from(pdfBytes));
   }
 }
