@@ -85,7 +85,7 @@ export default async function handler(req, res) {
 
     // Bygg PDF
     const pdfDoc = await PDFDocument.create();
-    const page = pdfDoc.addPage([595, 842]);
+    let page = pdfDoc.addPage([595, 842]);
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     let y = 780;
 
