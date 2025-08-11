@@ -1,6 +1,6 @@
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
-async function fetchWithTimeout(url, options = {}, timeout = 3000) {
+async function fetchWithTimeout(url, options = {}, timeout = 6000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
   try {
